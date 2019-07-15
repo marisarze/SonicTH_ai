@@ -5,7 +5,7 @@ from collections import deque
 import cv2
 from matplotlib import pyplot as plt
 import random
-env = retro.make(game='SonicAndKnuckles3-Genesis', state='AngelIslandZone.Act1', scenario='contest')
+env = retro.make(game='SonicTheHedgehog-Genesis', state='LabyrinthZone.Act1', scenario='contest')
 episodes = 1
 
 def convert_order(order):
@@ -54,6 +54,8 @@ def convert_order(order):
 
 m = deque(maxlen=1)
 
+
+
 for e in range(episodes):
     obs = env.reset()
     aord = 'B'
@@ -61,12 +63,12 @@ for e in range(episodes):
     done = False
     t = 0
     ss = 0
-    while t < 6000:
+    while not done:
         env.render()
         action = convert_order(random.randint(0,8))
         obs, rew, done, info = env.step(action)
-        resized = cv2.resize(obs,(168,126))
-        if ss>100:
+        resized = cv2.resize(obs,(128, 90))
+        if ss>1000:
             fig, axes = plt.subplots(1, 1)
             fig.set_size_inches(10, 10)
             axes.imshow(resized)

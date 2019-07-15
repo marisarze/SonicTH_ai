@@ -31,22 +31,25 @@ from keras.losses import mean_squared_error
 from keras.losses import categorical_crossentropy
 
 class SonicAgent():
-    def __init__(self, n_episodes=5000, max_env_steps=None, state_len=3, gamma=1, batchsize=1):
+    def __init__(self, n_episodes=5000, max_env_steps=None, state_len=4, gamma=0.985, batchsize=1):
         self.state_len = state_len
         self.epsilon_max = 1
         self.batchsize = batchsize
-        self.height = 108
-        self.width = 144
-        self.env = retro.make(game='SonicAndKnuckles3-Genesis', state='AngelIslandZone.Act1', scenario='contest')
+        self.height = 150
+        self.width = 200
+        self.env = retro.make(game='SonicTheHedgehog-Genesis', state='GreenHillZone.Act1', scenario='contest')
         self.env.reset()
         self.gamma = gamma
         self.n_episodes = n_episodes
-        self.beta = 0.2
-        self.timedelay = 12
+        self.beta = 0.1
+        self.timedelay = 15
         self.A_memory = []
         self.R_memory = []
         self.state_memory = []
-        self.adam = Adam(lr=0.00002, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False)
+        #self.adam1 = Adam(lr=1e-6, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False)
+        #self.adam2 = Adam(lr=1e-6, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False)
+        self.adam1 = SGD(lr=1e-5, momentum=0.0, decay=0.0, nesterov=False)
+        self.adam2 = SGD(lr=1e-5, momentum=0.0, decay=0.0, nesterov=False)
         self.model, self.icm, self.feature_model, self.ireward = self.build_models()
         self.compiled = False
 
@@ -56,14 +59,15 @@ class SonicAgent():
             return tensor[:,-1,:]
 
         image_input = Input(shape=(self.state_len, self.height, self.width, 3))
-        xf = TimeDistributed(Conv2D(120, (4, 4), activation='relu', padding='same'))(image_input)
+        xf = TimeDistributed(Conv2D(90, (9, 9), activation='relu', padding='same'))(image_input)
+        xf = TimeDistributed(MaxPooling2D((2,2)))(xf)
         xf = TimeDistributed(BatchNormalization())(xf)
         print(xf.shape)
-        xf = TimeDistributed(Conv2D(90, (4, 4), activation='relu', padding='same'))(xf)
-        xf = TimeDistributed(MaxPooling2D((3,3)))(xf)
+        xf = TimeDistributed(Conv2D(60, (6, 6), activation='relu', padding='same'))(xf)
+        xf = TimeDistributed(MaxPooling2D((2,2)))(xf)
         xf = TimeDistributed(BatchNormalization())(xf)
         print(xf.shape)
-        xf = TimeDistributed(Conv2D(60, (4, 4), activation='relu', padding='same'))(xf)
+        xf = TimeDistributed(Conv2D(60, (5, 5), activation='relu', padding='same'))(xf)
         xf = TimeDistributed(MaxPooling2D((3,3)))(xf)
         features = TimeDistributed(Flatten())(xf)
         print('feature shape is: ', features.shape)
@@ -72,42 +76,47 @@ class SonicAgent():
         state_current = Input(shape=(self.state_len, self.height, self.width, 3), name='state_current')
         state_next = Input(shape=(self.state_len, self.height, self.width, 3), name='state_next')
         feature_current = feature_model(state_current)
+        last_feature = Lambda(last_image)(feature_current)
+        feature_dimension = int(last_feature.shape[1])
+
         feature_next = feature_model(state_next)
         inverse_input = Concatenate()([feature_current,feature_next])
-        xi = TimeDistributed(Dense(2000, activation='relu'))(inverse_input)
-        xi = CuDNNLSTM(100, return_sequences=False )(xi)
-        #xi = Dense(100, activation='relu')(xi)
+        xi = TimeDistributed(Dense(feature_dimension, activation='relu'))(inverse_input)
+        xi = TimeDistributed(Dense(feature_dimension, activation='relu'))(xi)
+        xi = CuDNNLSTM(50, return_sequences=False )(inverse_input)
+        xi = Dense(50, activation='relu')(xi)
         inverse_output = Dense(8, activation='softmax', name='inverse_output')(xi)
-
+        
         input_action = Input(shape=(8,), name='action')
-        recurrent_branch = CuDNNLSTM(100, return_sequences=False)(feature_current)
+        recurrent_branch = CuDNNLSTM(50, return_sequences=False)(feature_current)
 
-        last_feature = Lambda(last_image)(feature_current)
+        
         forward_input = Concatenate()([last_feature, input_action, recurrent_branch])
-        feature_dimension = int(last_feature.shape[1])
+        
         xfo = Dense(feature_dimension, activation='relu')(forward_input)
+        xfo = Dense(feature_dimension, activation='relu')(xfo)
         forward_output = Dense(feature_dimension, activation='relu')(xfo)
         last_feature_next = Lambda(last_image)(feature_next)
 
         icm = Model(inputs=[input_action, state_current, state_next], outputs=[inverse_output])
         def icm_loss(ytrue, ypred):
-            return self.beta * K.mean(K.square(forward_output - last_feature_next), axis=1) + (1 - self.beta) * K.categorical_crossentropy(ytrue, ypred)
+            return self.beta * K.mean(0.5 * K.square(forward_output - last_feature_next), axis=1) + (1 - self.beta) * K.categorical_crossentropy(ytrue, ypred)
         
-        icm.compile(loss=icm_loss, optimizer=self.adam)
+        icm.compile(loss=icm_loss, optimizer=self.adam2, metrics=['accuracy'])
         
-        ireward_output = Lambda(lambda x: K.mean(K.square(x[0] - x[1]), axis=1))([forward_output,last_feature_next])					
+        ireward_output = Lambda(lambda x: K.mean(0.5 * K.square(x[0] - x[1]), axis=1))([forward_output,last_feature_next])					
         ireward = Model(inputs=[input_action, state_current, state_next], outputs=ireward_output)
 
-        main_input = feature_current
+        #main_input = Input(shape=(self.state_len, self.height, self.width, 3))
+        x = TimeDistributed(Dense(feature_dimension, activation='relu'))(feature_current)
+        x = TimeDistributed(Dense(feature_dimension, activation='relu'))(x)
         reward_input = Input(shape=(8,))
-        x = TimeDistributed(Dense(2000, activation='relu'))(main_input)
-        x = CuDNNLSTM(100, return_sequences=False)(x)
-        x = Dense(100, activation='relu')(x)
+        x = Dense(50, activation='relu')(x)
         main_output = Dense(8, activation='softmax')(x)
 
         main_model = Model([state_current, reward_input], main_output)
         main_model.add_loss(self.sample_loss(main_output, reward_input))
-        main_model.compile(optimizer=self.adam)
+        main_model.compile(optimizer=self.adam1)
         return main_model, icm, feature_model, ireward
 
     def sample_loss(self, model_output, reward_input):
@@ -201,11 +210,11 @@ class SonicAgent():
         actions = np.zeros((steps,8))
         for ind in range(steps):
             actions[ind, a[ind]] = 1
-        intrinsic = self.ireward.predict([actions, current, next], verbose=1)
-
+        intrinsic = self.ireward.predict([actions, current, next], verbose=1, batch_size=5)
+        self.R_memory = self.R_memory[:-1]
         tempr = []
-        for reward in reversed(intrinsic):
-            tr = reward * self.timedelay / 36001 + tr * self.gamma
+        for (rewardi, rewarde) in zip(reversed(intrinsic), reversed(self.R_memory)):
+            tr = 0.2 * rewarde + 0.8 * rewardi * self.timedelay / 36001 + tr * self.gamma
             tempr.append(tr)
         tempr.reverse()
         self.Rdata = np.copy(actions)
@@ -219,7 +228,7 @@ class SonicAgent():
         print('--------------------------fit main model--------------------------------------')
         if not self.compiled:
             self.model.add_loss(self.sample_loss(self.model.output, self.model.inputs[1]))
-            self.model.compile(optimizer=self.adam)
+            self.model.compile(optimizer=self.adam1)
             self.compiled = True
         self.model.fit(x=[current, self.Rdata], y=[], verbose=1, shuffle=True, batch_size=1)
         print('--------------------------fit icm--------------------------------------')
@@ -243,7 +252,7 @@ class SonicAgent():
             cur_mem.append(np.copy(state))
             action, adesc, adescn = self.choose_action(cur_mem)
             done = False
-            
+            self.substep = 0
             episode_reward = 0
             control_count = 0
             frame_reward = 0
@@ -269,18 +278,13 @@ class SonicAgent():
                     control_count = 0
 
                 else:
-                #    if adesc == 'B':
-                #        action, adesc, adescn = self.convert_order('pass')
-                #    if adesc == 'RB':
-                #        action, adesc, adescn = self.convert_order('R')
-                #    if adesc == 'LB':
-                #        action, adesc, adescn = self.convert_order('L')
-                #    else:
                     action, adesc, adescn = self.convert_order(adesc)
                     next_state, reward, done, info = self.wrapped_step(action)
                 #state = np.copy(next_state)
-                cur_mem.append(np.copy(next_state))
-
+                if self.substep == 3:
+                    cur_mem.append(np.copy(next_state))
+                    self.substep = 0
+                self.substep += 1
                 control_count += 1
                 frame_reward += reward
                 episode_reward += reward
