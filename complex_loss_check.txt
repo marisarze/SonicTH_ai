@@ -1,0 +1,6 @@
+from matplotlib import pyplot as plt
+import numpy as np
+
+aspece = 10
+p = np.arrange(0, 1, 0.001)
+print(p)

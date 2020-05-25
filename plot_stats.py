@@ -9,33 +9,57 @@ with open(r'D:\sonic_models\results.json', 'r') as file:
     stat = json.load(file)
 
 
-fig = plt.figure()
-ax = fig.add_subplot(111, projection='3d')
+
+
 x = np.array(stat['x'])
 y = -np.array(stat['y'])
 s = np.array(stat['some_map'])
-
+e = np.array(stat['entropy_map'])
+r = np.array(stat['ireward_map'])
+a = s * e ** 4
 steps = len(x)
-i = math.ceil(steps/10)
+d = 12
 # randomize = np.arange(steps)
 # np.random.shuffle(randomize)
 # x = x[randomize]
 # y = y[randomize]
 # s = s[randomize]
+ee = e[::d]
+xx = x[::d]
+yy = y[::d]
+ss = s[::d]
+rr = r[::d]
+aa = a[::d]
 
-xx = x[:i]
-yy = y[:i]
-ss = s[:i]
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
 ax.scatter(xx,yy,ss)
 ax.set_xlabel('X axis')
 ax.set_ylabel('Y axis')
 ax.set_zlabel('ratio')
 plt.show()
 
-
-score = stat['entropy']
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(xx,yy,ee)
+ax.set_xlabel('X axis')
+ax.set_ylabel('Y axis')
+ax.set_zlabel('entropy')
+plt.show()
 
 fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(xx,yy,aa)
+ax.set_xlabel('X axis')
+ax.set_ylabel('Y axis')
+ax.set_zlabel('artificial')
+plt.show()
+
+
+score = stat['mean100_entropy']
+episodes = stat['episodes_numbers']
+print(len(score))
+fig = plt.figure()
 ax = fig.add_subplot()
-ax.plot(score)
+ax.plot(episodes, score)
 plt.show()
