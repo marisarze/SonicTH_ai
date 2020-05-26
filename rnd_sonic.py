@@ -51,7 +51,7 @@ def create_reward_net(state_len, fast=True):
     from keras.losses import categorical_crossentropy
     height = 84
     width = 120
-    activ='tanh'
+    activ = LeakyReLU(alpha=0.3)
     
     def reward_loss():
         def custom_loss(y_true, y_pred):
@@ -65,7 +65,7 @@ def create_reward_net(state_len, fast=True):
 
     state_input = Input(shape=(state_len, height, width, 3))
     float_input = K.cast(state_input, dtype='float32')
-    float_input = Lambda(lambda input: input/255)(float_input)
+    float_input = Lambda(lambda input: input/255.0-0.5)(float_input)
     new_input = Lambda(last_image)(float_input)
     xs = Conv2D(32, (4,4), activation=activ, strides=(2,2), padding='same')(new_input)
     xs = Conv2D(64, (4,4), activation=activ, strides=(2,2), padding='same')(xs)
@@ -86,9 +86,11 @@ def create_reward_net(state_len, fast=True):
     intrinsic_reward = Lambda(ireward)([stochastic_output, target_output])
     model = Model(inputs=state_input, outputs=intrinsic_reward)
     if fast:
-        adam = Adam(lr=1e-3, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
+        #adam = Adam(lr=1e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
+        adam = SGD(lr= 1e-4, momentum=0.9)
     else:
-        adam = Adam(lr=1e-5, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
+        #adam = Adam(lr=1e-6, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
+        adam = SGD(lr= 1e-6, momentum=0.9)
     model.compile(optimizer=adam, loss=reward_loss())
     return model
 
@@ -128,7 +130,6 @@ def create_policy_net(model_type, state_len, action_space):
     crange = 0.4
     action_space = 10
     activ1='tanh'
-    activ2='relu'
     def sample_loss(reward_input, old_input):
         def custom_loss(y_true, y_pred):
             entropy = -K.sum(y_pred * K.log(y_pred), axis=-1) / K.log(tf.constant(action_space, tf.float32))
@@ -149,7 +150,7 @@ def create_policy_net(model_type, state_len, action_space):
     state_input = Input(shape=(state_len, height, width, 3))
     float_input = K.cast(state_input, dtype='float32')
     float_input = Lambda(last_image)(float_input)
-    float_input = Lambda(lambda input: input/127.5-1)(float_input)
+    float_input = Lambda(lambda input: input/255.0-0.5)(float_input)
     x = Conv2D(32, (8,8), activation=activ1, strides=(4,4), padding='same')(float_input)
     x = Conv2D(64, (4,4), activation=activ1, strides=(2,2), padding='same')(x)
     x = Conv2D(128, (3,3), activation=activ1, padding='same')(x)
@@ -172,7 +173,7 @@ def create_policy_net(model_type, state_len, action_space):
     
 
 class SonicAgent():
-    def __init__(self, episodes_step=10, max_env_steps=None, state_len=1, gamma=0.999, batch_size=128, workers=6, render=False):
+    def __init__(self, episodes_step=10, max_env_steps=None, state_len=1, gamma=0.999, batch_size=256, workers=6, render=False):
         self.timedelay = 20
         self.batch_size = batch_size
         self.csteps = episodes_step * 36000 / self.timedelay / self.batch_size
@@ -195,10 +196,10 @@ class SonicAgent():
         self.adv = np.float32
         self.stats = dict()
         self.maxstat = 3000
-        self.critical_steps = math.ceil(math.log(1e-4,self.igamma))
+        self.critical_steps = math.ceil(math.log(1e-3,self.igamma))
         self.horizon = 6 * self.critical_steps
-        self.minimal_steps = 2 * self.horizon
-        self.choosed_length = self.horizon - self.critical_steps
+        self.choosed_length = 3 * self.critical_steps
+        self.minimal_steps = self.horizon
         # self.special_game_ids = [2**i for i in range(20)]
         # temp = []
         # for num in self.special_game_ids[:]:
@@ -224,12 +225,13 @@ class SonicAgent():
         istd = np.std(ratio)
         imin = np.min(ratio)
         imax = np.max(ratio)
-        #ratio -= self.stats['imean']
+        ratio -= self.stats['imean']
         ratio /= self.stats['istd']
         m = 2 * self.horizon
+        irewards = np.hstack((ratio[1:] - ratio[:-1], ratio[0]-ratio[-1]))
+        mentropy = np.hstack((entropy[1:], entropy[0]))
+        irewards = irewards * (entropy ** 0.2)
         
-        mratio = ratio * (entropy ** 4)
-        irewards = np.hstack((mratio[1:] - mratio[:-1], mratio[0]-mratio[-1]))
         
         self.stats['imean'] = ((m - steps) * self.stats['imean'] + steps * imean)/m
         self.stats['istd']  = ((m - steps) * self.stats['istd'] + steps * istd)/m
@@ -253,6 +255,7 @@ class SonicAgent():
         except:
             print('loading default stats...')
             self.stats['steps'] = 0
+            self.stats['steps_list'] = []
             self.stats['episodes_passed'] = 0
             self.stats['episodes_numbers'] = []
             self.stats['emean'] = 1
@@ -350,6 +353,7 @@ class SonicAgent():
                 
                 
                 self.stats['steps'] += steps
+                self.stats['steps_list'].append(self.stats['steps']) 
                 self.stats['entropy'].append(np.mean(entropy))
                 self.stats['emean'] = ((m - steps) * self.stats['emean'] + steps * self.stats['entropy'][-1])/m
                 self.stats['mean100_entropy'].append(np.mean(self.stats['entropy'][-100:]))
@@ -388,24 +392,26 @@ class SonicAgent():
                 eadvantage_memory.extend(eadvantages)
                 evalue_memory.extend(etargets)
                 print('---------------------------------------------------------')
-            if len(state_memory) > self.horizon:
-                iadvantage_memory, ivalue_memory = self.compute_advantages(state_memory,
-                                                                ireward_memory,
-                                                                action_memory,
+            if len(state_memory) > self.choosed_length:
+                iadvantage_memory, ivalue_memory = self.compute_advantages(2*state_memory,
+                                                                2*ireward_memory,
+                                                                2*action_memory,
                                                                 iVmodel,
                                                                 self.igamma,
                                                                 self.lam,
                                                                 self.iw,
                                                                 False,
                                                                 True)
-                advantage_memory = 0 * np.array(eadvantage_memory) + iadvantage_memory
+                ivalue_memory = ivalue_memory[:len(state_memory)]
+                iadvantage_memory = iadvantage_memory[:len(state_memory)]
+                advantage_memory = 0 * np.array(eadvantage_memory) + iadvantage_memory[:len(state_memory)]
 
-                state_buffer = np.array(state_memory[:self.choosed_length], dtype=np.uint8)
-                advantage_buffer = np.array(advantage_memory[:self.choosed_length])
+                state_buffer = np.array(state_memory, dtype=np.uint8)
+                advantage_buffer = np.array(advantage_memory)
                 advantage_buffer /= np.std(advantage_buffer)
-                evalue_buffer = np.array(evalue_memory[:self.choosed_length])
-                ivalue_buffer = np.array(ivalue_memory[:self.choosed_length])
-                old_buffer = np.array(old_memory[:self.choosed_length])
+                evalue_buffer = np.array(evalue_memory)
+                ivalue_buffer = np.array(ivalue_memory)
+                old_buffer = np.array(old_memory)
                 usteps = math.ceil(len(state_buffer)/self.batch_size)-1
 
                 randomize = np.arange(len(state_buffer))
@@ -441,7 +447,7 @@ class SonicAgent():
                                             verbose=1)
                 print('training ireward old model...')   
                 imodel_old.fit_generator(generator=igenerator,
-                                            steps_per_epoch=1, 
+                                            steps_per_epoch=10, 
                                             epochs=1, 
                                             verbose=1)
                 print('training int value model...')
@@ -474,19 +480,20 @@ class SonicAgent():
                 eVmodel.save_weights(r'D:\sonic_models\evalue_model.h5')
                 iVmodel.save_weights(r'D:\sonic_models\ivalue_model.h5')
 
-                l = []
-                for _ in range(self.maxstat):
-                    r=random.randint(0,len(self.stats['episodes_numbers'])-1)
-                    if r not in l: 
-                        l.append(r)
+                # l = []
+                # for _ in range(math.ceil(self.maxstat/2)):
+                #     r=random.randint(math.ceil(len(self.stats['episodes_numbers'])/2),
+                #                             len(self.stats['episodes_numbers'])-1)
+                #     if r not in l: 
+                #         l.append(r)
 
                 for key in self.stats.keys():
                     if isinstance(self.stats[key], list):
-                        if (key not in excluded) and (len(self.stats[key])>self.maxstat):
-                            new = []
-                            for r in sorted(l):
-                                new.append(self.stats[key][r])
-                            self.stats[key] = new
+                        # if (key not in excluded) and (len(self.stats[key])>self.maxstat):
+                        #     new = []
+                        #     for r in sorted(l):
+                        #         new.append(self.stats[key][r])
+                        #     self.stats[key][-len(new):] = new
                         self.stats[key] = list(map(lambda x: float(x), self.stats[key]))
                     elif isinstance(self.stats[key], np.generic):
                         self.stats[key] = float(self.stats[key])
@@ -603,11 +610,11 @@ class SonicAgent():
 
         if trace:
             if value_model:
-                print('values_mean:', np.mean(values))
-            print('meanG:', np.mean(G))
-            print('target_values:', np.mean(target_values))
-            print('advantages_mean:', np.mean(np.abs(advantages)))
-            print('advantages_std:', np.std(advantages))
+                print('values_mean:', np.mean(values[:self.choosed_length]))
+            print('meanG_choosed:', np.mean(G[:self.choosed_length]), 'meanG_all:', np.mean(G))
+            print('target_values:', np.mean(target_values[:self.choosed_length]))
+            print('advantages_mean:', np.mean(np.abs(advantages[:self.choosed_length])))
+            print('advantages_std:', np.std(advantages[:self.choosed_length]))
         return advantages, target_values
 
     def run_episode(self, Amodel, render=False, record=False, game_id=0, path='.'):

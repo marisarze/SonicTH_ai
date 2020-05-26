@@ -3,10 +3,10 @@ import numpy as np
 
 
 aspace = 10
-d = 0.2
+d = 1
 A = 1
 C = abs(0.2 * A)
-Z = 0.2
+Z = 0.5
 start = (1-d) * Z
 finish = (1+d) * Z
 probs = np.linspace(start, finish, 10000, dtype=np.float64)
@@ -27,7 +27,7 @@ dl = np.array(dl)
 
 entropies = np.array(entropies)
 L = np.array(L)
-plt.plot(probs,L)
+plt.plot(probs,entropies ** 0.5)
 # plt.plot(probs[:-1],dl)
 # plt.xlabel('entropy')
 # plt.ylabel('loss')
