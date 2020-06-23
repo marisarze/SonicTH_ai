@@ -50,55 +50,67 @@ from keras import backend as K
 from keras.losses import mean_squared_error
 from keras.losses import categorical_crossentropy
 
-def base_net(input_shape):
+def create_reward_net(state_len, fast=True):
+    height = 84
+    width = 120
     activ = LeakyReLU(alpha=0.3)
+
+    def loss_function(x1,x2):
+        def custom_loss(y_true, y_pred):
+            return K.mean(K.pow(0.5 * (x1 - x2), 2), axis=-1)
+        return custom_loss
 
     def last_image(tensor):
         return tensor[:,-1,:]
 
-    input = Input(shape=input_shape)
-    float_input = K.cast(input, dtype='float32')
-    float_input = Lambda(lambda input: input/255.0-0.5)(float_input)
-    last_image = Lambda(last_image)(float_input)
-    x = Conv2D(32, (8,8), strides=(4,4), padding='same')(last_image)
-    x = activ(x)
-    x = Conv2D(64, (4,4), strides=(2,2), padding='same')(x)
-    x = activ(x)
-    x = Conv2D(64, (2,2), strides=(1,1), padding='same')(x)
-    x = activ(x)
-    x = Conv2D(128, (2,2), strides=(1,1), padding='same')(x)
-    x = activ(x)
-    output = Flatten()(x)
-    model = Model(inputs=input, outputs=output)
-    model.summary()
-    return model
-
-def reward_net(input_shape):
-
-    def loss_function(x1,x2):
-        def custom_loss(y_true, y_pred):
-            return K.mean(K.abs(0.5 * (x1 - x2)), axis=-1)
-        return custom_loss
-
     def ireward(tensor):
         return  K.mean(K.pow(0.5 * (tensor[0] - tensor[1]), 2), axis=-1)
 
-    input = Input(shape=input_shape)
-    trainable_part = base_net(input_shape)
-    stochastic_part = base_net(input_shape)
+    state_input = Input(shape=(state_len, height, width, 3))
+    float_input = K.cast(state_input, dtype='float32')
+    float_input = Lambda(lambda input: input/255.0-0.5)(float_input)
+    new_input = Lambda(last_image)(float_input)
+    xs = Conv2D(32, (4,4), strides=(2,2), padding='same')(new_input)
+    xs = activ(xs)
+    xs = Conv2D(64, (4,4), strides=(2,2), padding='same')(xs)
+    xs = activ(xs)
+    xs = Conv2D(64, (4,4), strides=(2,2), padding='same')(xs)
+    xs = activ(xs)
+    xs = Conv2D(128, (4,4), strides=(2,2), padding='same')(xs)
+    xs = activ(xs)
+    stochastic_output = Flatten()(xs)
+    stochastic_part = Model(inputs=state_input, outputs=stochastic_output)
     for layer in stochastic_part.layers:
         layer.trainable = False
 
-    stochastic_output = stochastic_part(input)
-    trainable_output = trainable_part(input)
-    intrinsic_reward = Lambda(ireward)([stochastic_output, trainable_output])
-    model = Model(inputs=input, outputs=intrinsic_reward)
-    adam = SGD(lr= 1e-2, momentum=0)
+    xt = Conv2D(32, (4,4), strides=(2,2), padding='same')(new_input)
+    xt = activ(xt)
+    xt = Conv2D(64, (4,4), strides=(2,2), padding='same')(xt)
+    xt = activ(xt)
+    xt = Conv2D(64, (4,4), strides=(2,2), padding='same')(xt)
+    xt = activ(xt)
+    xt = Conv2D(128, (4,4), strides=(2,2), padding='same')(xt)
+    xt = activ(xt)
+    target_output = Flatten()(xt)
+
+    intrinsic_reward = Lambda(ireward)([stochastic_output, target_output])
+    model = Model(inputs=state_input, outputs=intrinsic_reward)
+    if fast:
+        #adam = Adam(lr=2e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
+        adam = SGD(lr= 2e-4, momentum=0)
+    else:
+        #adam = Adam(lr=2e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
+        adam = SGD(lr= 2e-4, momentum=0)
     model.compile(optimizer=adam, loss=loss_function(target_output, stochastic_output))
     return model
 
-def policy_net(input_shape, action_space):
-
+def create_policy_net(model_type, state_len, action_space):
+    height = 84
+    width = 120
+    beta = 0.1
+    crange = 0.1
+    activ1 = 'tanh'
+    activ2 = LeakyReLU(alpha=0.2)
     def sample_loss(reward_input, old_input):
         def custom_loss(y_true, y_pred):
             entropy = -K.sum(y_pred * K.log(y_pred), axis=-1) / K.log(tf.constant(action_space, tf.float32))
@@ -120,10 +132,9 @@ def policy_net(input_shape, action_space):
     def last_image(tensor):
         return tensor[:,-1,:]
     
-
     reward_input = Input(shape=(action_space,))
     old_policy_input = Input(shape=(action_space,))
-    state_input = Input(shape=input_shape)
+    state_input = Input(shape=(state_len, height, width, 3))
     float_input = K.cast(state_input, dtype='float32')
     float_input = Lambda(last_image)(float_input)
     float_input = Lambda(lambda input: input/255.0-0.5)(float_input)
@@ -137,14 +148,14 @@ def policy_net(input_shape, action_space):
     x = Dense(512, activation=activ1)(x)
     x = Dense(512, activation=activ1)(x)
     if model_type=='policy':
-        adam1 = Adam(lr=1e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False, clipnorm=1.0)
-        #adam1 = SGD(lr= 2e-4, momentum=0.9, clipnorm=1.0)
+        #adam1 = Adam(lr=2e-5, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False, clipnorm=1.0)
+        adam1 = SGD(lr= 2e-4, momentum=0, clipnorm=1.0)
         main_output = Dense(action_space, activation='softmax', name='main_output')(x)
         model = Model(inputs=[state_input,reward_input,old_policy_input],outputs=main_output)
         model.compile(optimizer=adam1, loss=sample_loss(reward_input,old_policy_input))
     elif model_type=='critic':
-        adam1 = Adam(lr=1e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
-        #adam1 = SGD(lr= 2e-4, momentum=0, clipnorm=1.0)
+        #adam1 = Adam(lr=2e-5, beta_1=0.9, beta_2=0.999, epsilon=1e-5, decay=0.0, amsgrad=False)
+        adam1 = SGD(lr= 2e-4, momentum=0, clipnorm=1.0)
         critic_output = Dense(1, activation='linear', name='critic_output')(x)
         model = Model(inputs=state_input,outputs=critic_output)
         model.compile(optimizer=adam1, loss=critic_loss)
@@ -162,13 +173,13 @@ class SonicAgent():
         self.iw = 1
         self.ew = 0
         self.epochs = 4
-        self.count = 8
+        
         self.actions = self.get_actions()
         self.action_space = len(self.actions)
         self.state_len = 1
         self.height = 84
         self.width = 120
-        self.lam = 1
+        self.lam = 0.95
         self.gamma = gamma
         self.egamma = gamma
         self.igamma = gamma
@@ -200,17 +211,14 @@ class SonicAgent():
     
     def get_imodel_result(self, state_memory, imodel_new, imodel_old, entropy):
         states = self.process_states(state_memory)
-        iloss_new = imodel_new.predict(states)
-        ratio = iloss_new
+        iloss = imodel_new.predict(states)
+        ratio = iloss 
         if self.stats['initialized'] > 0:
             ratio -= self.stats['imean']
             ratio /= self.stats['istd']
-        #mratio = np.clip(ratio, 0, 100)
-        #irewards = self.iw * (1-self.igamma) * ratio
-        #irewards = np.clip(irewards, 0, 10)
-        irewards = np.zeros((len(states),))
-        irewards[:-1] = ratio[1:] - ratio[:-1]  
-        irewards[-12:] = 0
+        
+        irewards = self.iw * (1-self.igamma) * ratio
+
         return irewards, ratio
 
     def save_stats(self, path=r'D:\sonic_models\results.json'):
@@ -220,13 +228,6 @@ class SonicAgent():
             print('Stats saved')
         except:
             print('Error occured for saving stats')
-
-    def create_models(self, models):
-        for key in models.keys():
-            temp = models[key]['creator'](*models[key]['args'])
-            if os.path.isfile(models[key]['path']):
-                temp.load_weights(models[key]['path'])
-            vars()[key] = temp
 
     def run_train(self):
         lock = Lock()
@@ -284,7 +285,6 @@ class SonicAgent():
         action_memory = list()
         ireward_memory = list()
         #ereward_memory = list()
-        death_memory = deque(maxlen=10000)
         excluded = ['x', 'y', 'some_map', 'ireward_map', 'entropy_map', 'cutted']
         for elem in excluded:
             self.stats[elem] = []
@@ -340,7 +340,7 @@ class SonicAgent():
                                                                 self.lam,
                                                                 True,
                                                                 False)
-                death_memory.extend(states[-6:])
+
                 state_memory.extend(states)
                 ireward_memory.extend(irewards)
                 #ereward_memory.extend(erewards)
@@ -351,15 +351,12 @@ class SonicAgent():
                 #evalue_memory.extend(etargets)
                 ivalue_memory.extend(itargets)
                 print('---------------------------------------------------------')
-            if (len(state_memory) > self.choosed_length) and count>self.count:
-                print(len(death_memory))
+            if (len(state_memory) > self.choosed_length) and count>32:
+
                 count = 0
                 advantage_memory = np.array(iadvantage_memory)
                 state_buffer = np.array(state_memory, dtype=np.uint8)
                 advantage_buffer = np.array(advantage_memory)
-
-
-                
                 astd = np.std(np.sum(advantage_buffer, axis=-1))
                 advantage_buffer /= astd
                 
@@ -376,6 +373,38 @@ class SonicAgent():
                 ivalue_buffer = ivalue_buffer[randomize]
                 old_buffer = old_buffer[randomize]
 
+                preloss = imodel_new.predict(state_buffer)
+                imean = np.mean(preloss)
+                istd = np.std(preloss)
+                imin = np.min(preloss)
+                imax = np.max(preloss)
+                if self.stats['initialized'] == 1:
+                    self.stats['imean'] = imean
+                    self.stats['istd']  = istd
+                    self.stats['imax'] = imax
+                    self.stats['imin'] = imin
+                if self.stats['initialized'] > 1:
+                    self.stats['imean'] = ((self.horizon - steps) * self.stats['imean'] + steps * imean)/self.horizon
+                    self.stats['istd']  = ((self.horizon - steps) * self.stats['istd'] + steps * istd)/self.horizon
+                    self.stats['imax'] = ((self.horizon - steps) * self.stats['imax'] + steps * imax)/self.horizon
+                    self.stats['imin'] = ((self.horizon - steps) * self.stats['imin'] + steps * imin)/self.horizon
+                
+                if self.stats['steps'] >self.minimal_steps:
+                    print('training policy model...')
+                    agenerator = self.batch_generator_simple(state_buffer,
+                                                    advantage_buffer,
+                                                    old_buffer,
+                                                    target='policy')
+                    Amodel.fit_generator(generator=agenerator, 
+                                                steps_per_epoch=usteps, 
+                                                epochs=self.epochs, 
+                                                verbose=1)
+                # print('training ext value model...')
+                # evgenerator = self.batch_generator(state_buffer, advantage_buffer, evalue_buffer, old_buffer, target='value')
+                # eVmodel.fit_generator(generator=evgenerator, 
+                #                             steps_per_epoch=usteps, 
+                #                             epochs=self.epochs, 
+                #                             verbose=1)
                 print('training ireward new model...')
                 # imodel_old.set_weights(imodel_middle.get_weights())
                 # imodel_middle.set_weights(imodel_new.get_weights())
@@ -384,51 +413,6 @@ class SonicAgent():
                                             steps_per_epoch=usteps, 
                                             epochs=1,
                                             verbose=1)
-                # death_buffer = np.array(death_memory)
-                # randomize = np.arange(len(death_buffer))
-                # death_buffer = death_buffer[randomize]
-                # if len(death_buffer) > self.batch_size:
-                #     igenerator = self.imodel_generator(death_buffer, self.batch_size)
-                #     imodel_old.fit_generator(generator=igenerator,
-                #                                 steps_per_epoch=usteps, 
-                #                                 epochs=1,
-                #                                 verbose=1)
-                
-                preloss_new = imodel_new.predict(state_buffer)
-                #preloss_old = imodel_new.predict(state_buffer)
-                preloss = preloss_new #* preloss_old
-                imean = np.mean(preloss)
-                istd = np.std(preloss)
-                imin = np.min(preloss)
-                imax = np.max(preloss)
-                #if self.stats['initialized'] == 1:
-                self.stats['imean'] = imean
-                self.stats['istd']  = istd
-                self.stats['imax'] = imax
-                self.stats['imin'] = imin
-                # if self.stats['initialized'] > 1:
-                #     self.stats['imean'] = ((self.horizon - steps) * self.stats['imean'] + steps * imean)/self.horizon
-                #     self.stats['istd']  = ((self.horizon - steps) * self.stats['istd'] + steps * istd)/self.horizon
-                #     self.stats['imax'] = ((self.horizon - steps) * self.stats['imax'] + steps * imax)/self.horizon
-                #     self.stats['imin'] = ((self.horizon - steps) * self.stats['imin'] + steps * imin)/self.horizon
-                
-                if self.stats['initialized'] > 4:
-                    print('training policy model...')
-                    agenerator = self.batch_generator_simple(state_buffer,
-                                                    advantage_buffer,
-                                                    old_buffer,
-                                                    target='policy')
-                    Amodel.fit_generator(generator=agenerator, 
-                                                steps_per_epoch=usteps, 
-                                                epochs=1, 
-                                                verbose=1)
-                # print('training ext value model...')
-                # evgenerator = self.batch_generator(state_buffer, advantage_buffer, evalue_buffer, old_buffer, target='value')
-                # eVmodel.fit_generator(generator=evgenerator, 
-                #                             steps_per_epoch=usteps, 
-                #                             epochs=self.epochs, 
-                #                             verbose=1)
-                
 
 
                 # print('training ireward old model...')   
@@ -460,6 +444,7 @@ class SonicAgent():
                 eadvantage_memory = list()
                 iadvantage_memory = list()
                 advantage_memory = list()
+
                 lock.acquire()
                 imodel_new.save_weights(r'D:\sonic_models\imodel_new.h5')
                 imodel_old.save_weights(r'D:\sonic_models\imodel_old.h5')
@@ -481,7 +466,7 @@ class SonicAgent():
                         #     for r in sorted(l):
                         #         new.append(self.stats[key][r])
                         #     self.stats[key][-len(new):] = new
-                        if key not in excluded and len(self.stats[key])>1000:
+                        if key not in excluded and len(self.stats[key])>2500:
                             self.stats[key] = self.stats[key][::2]
                         self.stats[key] = list(map(lambda x: float(x), self.stats[key]))
                         
@@ -617,7 +602,7 @@ class SonicAgent():
         td = np.zeros((steps,1)).astype(self.adv)
         rewards = rewards.reshape((-1,1))
         
-        if self.stats['initialized']<1000000000000000:
+        if self.stats['initialized']<50:
             target_values[:,0] = G[:]
         else:
             target_values[:,0] = rewards[:,0] + gamma * values[1:,0]
