@@ -25,26 +25,26 @@ from rnd_models import *
 
 
 class SonicAgent():
-    def __init__(self, episodes_step=10, max_env_steps=None, state_len=4, gamma=0.999, batch_size=10, workers=1, render=False):
+    def __init__(self, episodes_step=10, max_env_steps=None, state_len=1, gamma=1, batch_size=64, workers=5, render=False):
         self.game_name = 'SonicTheHedgehog-Genesis'
-        self.map_name = 'GreenHillZone.Act1'
+        self.map_name = 'LabyrinthZone.Act2'
         self.scenario = 'contest'
         self.timedelay = 12
         self.batch_size = batch_size
         self.csteps = 36000 / self.timedelay
         self.num_workers = workers
-        self.iw = 0.0
-        self.ew = 1.0
+        self.iw = 1.0
+        self.ew = 0.0
         self.epochs = 5
-        self.count = 8
+        self.count = 5
         self.actions = self.get_actions()
         self.action_space = len(self.actions)
         self.state_len = state_len
         self.width = 120
         self.height = 84
         self.state_shape = (self.state_len, self.height, self.width,3)
-        self.lam = 0.95
-        self.crange = 0.05
+        self.lam = 0.999
+        self.crange = 0.002
         self.epsilon = 0.1
         self.gamma = gamma
         self.egamma = gamma 
@@ -58,10 +58,16 @@ class SonicAgent():
         self.maxstat = 3000
         self.epoch_size = 10
         self.nonusable_steps = 0#math.ceil(math.log(1e-4, self.igamma))
-        self.choosed_length = 1 * self.batch_size + self.nonusable_steps
-        self.memory_size = 1 * self.batch_size + self.nonusable_steps
-        self.horizon = self.choosed_length
+        self.choosed_length = 0 * self.csteps + self.nonusable_steps
+        self.memory_size = 10*self.csteps + self.nonusable_steps
+        self.horizon = 15 * self.csteps
+
+        self.stats['policy_lr'] = 1e-6
+        self.stats['evmodel_lr'] = 1e-6 * math.sqrt(self.batch_size)
+        self.stats['ivmodel_lr'] = 1e-6 * math.sqrt(self.batch_size)
+        self.stats['imodel_lr'] = 1e-8 
         # self.special_game_ids = [2**i for i in range(20)]
+
         # temp = []
         # for num in self.special_game_ids[:]:
         #     for i in range(0,4):
@@ -78,12 +84,14 @@ class SonicAgent():
     def get_irewards(self, states):
         states = self.process_states(states)
         losses = self.get_iloss(states)
-        irewards = losses
+        
         if self.stats['initialized'] > 0:
-            irewards -= self.stats['imean']
-            irewards /= self.stats['istd']
-        irewards[:-1] = irewards[1:] - irewards[:-1]
-        irewards[-1] = 0
+            #losses -= self.stats['imean']
+            losses /= 10 * self.stats['istd'] #* self.csteps
+        #irewards = losses
+        irewards = np.zeros(losses.shape)
+        irewards[:-1] = losses[1:] - losses[:-1]
+        irewards[-1] = 0 #losses[0] - losses[-1] 
         #irewards *= 1-self.igamma
         #mratio = np.clip(ratio, 0, 100)
         #irewards = self.iw * (1-self.igamma) * ratio
@@ -93,15 +101,10 @@ class SonicAgent():
     def run_train(self):
         lock = Lock()
         self.get_stats()
-        
-        lock.acquire()
-        
-
-        lock.release()
         data = Queue()
         game_ids = Queue()
         render_que = Queue()
-        #render_que.put(True)
+        render_que.put(True)
 
         for i in range(self.stats['episodes_passed'], 1000000):
             game_ids.put(i)
@@ -115,7 +118,7 @@ class SonicAgent():
         
         print(processes)
         
-
+        
         self.create_models()
         self.reusable_memory = []
         self.base_keys = {'states': np.uint8,
@@ -146,7 +149,6 @@ class SonicAgent():
             
             
             result = data.get()
-            print('result size', getsizeof(result)/1024**2)
             temp_dict = dict()
             for key in self.base_keys.keys():
                 result[key] = np.array(result[key], dtype=self.base_keys[key])
@@ -162,10 +164,7 @@ class SonicAgent():
             print('memory_fullness', fullness, 'memory_len', len(self.reusable_memory), 'size', getsizeof(self.reusable_memory)/1024**2)
             
 
-            if  len(self.reusable_memory)<1:#self.get_memory_length() <= self.choosed_length:
-                #self.stats['initialized'] = 0
-                pass
-            else:
+            if self.get_memory_length() > self.choosed_length:#len(self.reusable_memory)>0
                 self.mean_adv = []
                 for result in self.reusable_memory:
                     result['irewards'] = self.get_irewards(result['states'])
@@ -179,140 +178,216 @@ class SonicAgent():
                                                                                                             self.lam,
                                                                                                             episodic=True,
                                                                                                             trace=False)
-                    self.mean_adv.append(np.mean(np.abs(np.sum(result['eadvantages'], axis=-1))))
-                    steps = len(result['states'])
+                    result['iadvantages'], result['itargets'], result['ivariance'] = self.compute_advantages(result['states'],
+                                                                                                            result['irewards'],
+                                                                                                            result['actions'],
+                                                                                                            self.ivmodel,
+                                                                                                            self.igamma,
+                                                                                                            self.lam,
+                                                                                                            episodic=True,
+                                                                                                            trace=False)
+
+                    #self.mean_adv.append(np.mean(np.abs(np.sum(result['eadvantages'], axis=-1))))
+                    steps = len(result['erewards'])
                     dummy_rew = np.zeros((steps, self.action_space))
                     dummy_old = np.zeros((steps, self.action_space))
-                    result['policy'] = self.amodel.predict([result['states'], dummy_rew, dummy_old])
-
-                    # crit_index = len(result['erewards'])
-                    # for i in range(len(result['erewards'])):
-                    #     if np.sum(result['erewards'][:i])>0.7:
-                    #         crit_index = i
-                    #         break
+                    dummy_ref = np.zeros((steps, self.action_space))
+                    dummy_crange = np.zeros((steps, 1))
+                    dummy_states = np.zeros((steps, *self.state_shape))
+                    result['policy'] = self.amodel.predict([result['states'], dummy_rew, dummy_states, dummy_ref, dummy_crange])
 
 
                     for key in result.keys():
                         self.buffer[key].extend(np.copy(result[key]))
-
+                    coords = result['coords']
+                    entropy = self.get_entropy(result['policy'])
+                    self.stats['x'].extend(list(coords[:-self.cutted_steps,0]))
+                    self.stats['y'].extend(list(coords[:-self.cutted_steps,1]))
+                    self.stats['some_map'].extend(list(result['irewards'][:-self.cutted_steps]))
+                    self.stats['ireward_map'].extend(list(result['irewards'][:-self.cutted_steps]))
+                    self.stats['entropy_map'].extend(list(entropy[:-self.cutted_steps]))
+                    self.stats['cutted'].append(steps-self.cutted_steps)
                 # for key in self.buffer.keys():
                 #     print(key, len(self.buffer[key]))
-                iadvantages, itargets, ivariance = self.compute_advantages(self.buffer['states'],
-                                                                    self.buffer['irewards'],
-                                                                    self.buffer['actions'],
-                                                                    self.ivmodel,
-                                                                    self.igamma,
-                                                                    self.lam,
-                                                                    episodic=True,
-                                                                    trace=False)
+                # iadvantages, itargets, ivariance = self.compute_advantages(self.buffer['states'],
+                #                                                     self.buffer['irewards'],
+                #                                                     self.buffer['actions'],
+                #                                                     self.ivmodel,
+                #                                                     self.igamma,
+                #                                                     self.lam,
+                #                                                     episodic=True,
+                #                                                     trace=False)
 
-                self.buffer['iadvantages'] =iadvantages
-                self.buffer['itargets'] = itargets
-                self.buffer['ivariance'] = ivariance
+                # self.buffer['iadvantages'] =iadvantages
+                # self.buffer['itargets'] = itargets
+                # self.buffer['ivariance'] = ivariance
                 print('buffer size', getsizeof(self.buffer)/1024**2)
                 for key in self.buffer.keys():
                     self.buffer[key] = np.array(self.buffer[key], dtype=self.all_keys[key])
                 self.buffer['advantages'] = self.iw * self.buffer['iadvantages'] + self.ew * self.buffer['eadvantages']
-                
-                # for key in self.buffer.keys():
-                #     print(key, self.buffer[key].shape, type(self.buffer[key]))
                     
                 
 
                 
 
                 usteps = math.ceil(len(self.buffer['states'])/self.batch_size)-1
-                #astd = np.std(np.sum(self.buffer['advantages'], axis=-1))
-                #amax = np.max(np.abs(np.sum(self.buffer['advantages'], axis=-1)))
-                # print('amax', amax)
-                # for i in range(len(self.buffer['advantages'])):
-                #     self.buffer['advantages'][i, self.buffer['actions'][i]] -= amean
-                # self.buffer['advantages'][i, self.buffer['actions'][i]] /= amax * 2 * self.batch_size
 
-                randomize = np.arange(len(self.buffer['advantages']))
-                np.random.shuffle(randomize)
-                random_states = self.buffer['states'][randomize]
-                random_policies = self.buffer['policy'][randomize]
-                steps = len(self.buffer['states'])
+                
 
 
                 print('training policy model...')
+                
                 temp_adv = np.sum(self.buffer['advantages'], axis=-1).reshape((-1,))
                 #temp_adv -= np.std(temp_adv)    
                 bool_adv = temp_adv>0
-                print('pos_parts', len(bool_adv[bool_adv])/ len(bool_adv))                    
-                losses = []
-                ef = min(len(self.buffer['states'])/self.csteps, 1)
-                crange = np.zeros((len(self.buffer['states']),1)) + ef * self.crange
-                K.set_value(self.amodel.optimizer.lr, self.stats['policy_lr'] * ef)
-                while True:
-                    history = self.amodel.fit(x=[self.buffer['states'], self.buffer['advantages'], random_states, random_pilicies, crange],
-                                    batch_size = self.batch_size, epochs=1)
-                    losses.append(history.history['loss'][-1])
-                    if len(losses)> 2:
-                        diffl = np.array(losses[:-1]) - np.array(losses[1:])
-                        ratio = diffl[-1]/np.max(diffl)
-                        # if diffl[-1]/diffl[-2] > 0.5:
-                        #     self.stats['policy_lr'] = np.clip(1.2 * self.stats['policy_lr'], 1e-4, 1e-1)
-                        # else:
-                        #     self.stats['policy_lr'] = np.clip(0.8 * self.stats['policy_lr'], 1e-4, 1e-1)
-                        # K.set_value(self.amodel.optimizer.lr, self.stats['policy_lr'])
-                        print('ratio:', round(ratio, 4), 'lr', round(self.stats['policy_lr'], 4))
-                        if abs(ratio)<0.1 and losses[-1]<losses[0]:
-                            break
+                pos_len = len(bool_adv[bool_adv])
+                print('pos_parts', pos_len/ len(temp_adv))
+                if pos_len>0:
+                    losses = []
+                    ef = min(len(self.buffer['states'][bool_adv])/self.memory_size, 1)
+                    mask = []
+                    for i, adv in enumerate(self.buffer['advantages'][bool_adv]):
+                        elem = adv/np.sum(adv, axis=-1)
+                        mask.append(elem)
+                        #self.buffer['advantages'][bool_adv][i] = elem 
+                    mask = np.array(mask)
+                    masked_policy = (self.buffer['policy'][bool_adv]) * mask
+                    choosed_policy = np.sum(masked_policy, axis=-1)
+                    ratios = (1-choosed_policy)/(1-1/self.action_space)
+                    ratios = np.clip(ratios, 0, 1)
+                    crange = np.zeros((len(self.buffer['states'][bool_adv]),1))
+                    crange[:,0] += self.crange * ratios * ef
+                    count = 0
+                    
+                    while count<20:
+                        randomize = np.arange(len(self.buffer['advantages'][bool_adv]))
+                        np.random.shuffle(randomize)
+                        random_states = self.buffer['states'][bool_adv]
+                        random_policies = self.buffer['policy'][bool_adv]
+                        if count==0:
+                            losses.append(self.amodel.evaluate(x=[self.buffer['states'][bool_adv], self.buffer['advantages'][bool_adv], random_states, random_policies, crange],
+                                                                batch_size = self.batch_size))
+                            print('evaluated loss:', losses[-1])
+                        history = self.amodel.fit(x=[self.buffer['states'][bool_adv], self.buffer['advantages'][bool_adv], random_states, random_policies, crange],
+                                        batch_size = self.batch_size, epochs=10)
+                        losses.append(history.history['loss'][-1])
+                        peak = np.argmax(losses)
+                        count += 1
+                        if len(losses)> peak+self.count+1:
+                            diffl = np.array(losses[:-1]) - np.array(losses[1:])
+                            ratio = np.mean(diffl[-self.count:])/np.mean(diffl[peak:peak+self.count])
+                            # if diffl[-1]/diffl[-2] > 0.5:
+                            #     self.stats['policy_lr'] = np.clip(1.2 * self.stats['policy_lr'], 1e-5, 1e-1)
+                            # else:
+                            #     self.stats['policy_lr'] = np.clip(0.8 * self.stats['policy_lr'], 1e-5, 1e-1)
+                            # K.set_value(self.amodel.optimizer.lr, self.stats['policy_lr'])
+                            print('ratio:', round(ratio, 6), 'lr', round(self.stats['policy_lr'], 6))
+                            if ratio<0.3 and losses[-1]<losses[0]:
+                                break
                         
 
 
-                print('training ext value model...')       
-                losses = []
-                variance = np.mean(self.buffer['evariance'][:,0])
-                print('evariance', variance)
-                sigmas = np.zeros(self.buffer['evariance'].shape) + variance    
-                #while True:
-                history = self.evmodel.fit(x=[self.buffer['states'], self.buffer['etargets'], sigmas], 
-                                            batch_size = self.batch_size, epochs=1)
-                # losses.append(history.history['loss'][-1])
-                # if len(losses)> 2:
-                #     diffl = np.array(losses[:-1]) - np.array(losses[1:])
-                #     ratio = diffl[-1]/np.max(diffl)
-                #     print('ratio:', ratio)
-                #     if ratio<0.1:
-                #         break
-                        # if ratio>0.5:
-                        #     K.set_value(self.evmodel.optimizer.lr, self.evmodel.optimizer.get_config()['learning_rate'] * 1.2)
-                        # else:
-                        #     K.set_value(self.evmodel.optimizer.lr, self.evmodel.optimizer.get_config()['learning_rate'] * 0.8)
-                # print('training int value model...')
+                # print('training ext value model...')       
                 # losses = []
-                # while True:        
-                #     history = self.ivmodel.fit(x=self.buffer['states'],
-                #                                 y=self.buffer['itargets'],
-                #                                 batch_size = self.batch_size)
+                # variance = np.mean(self.buffer['evariance'][:,0])
+                # # print('evariance', variance)
+                # sigmas = np.zeros(self.buffer['evariance'].shape) + variance    
+                # while True:
+                #     history = self.evmodel.fit(x=[self.buffer['states'], self.buffer['etargets'], sigmas], 
+                #                                 batch_size = self.batch_size, epochs=1)
                 #     losses.append(history.history['loss'][-1])
-                #     maxi = np.argmax(losses)
-                #     if len(losses)> maxi+count:
-                #         denom = losses[maxi]-losses[maxi+count]
-                #         if abs(denom)>0:
-                #             ratio = (losses[-count]-losses[-1])/denom
-                #             print('ratio:', ratio)
-                #             if ratio > 0.1:
-                #                 continue
-                #         break
+                #         #break
+                #     if len(losses)> 11:
+                #         diffl = np.array(losses[:-1]) - np.array(losses[1:])
+                #         ratio = np.mean(diffl[-10:])/np.mean(np.abs(diffl))
+                #         # if diffl[-1]/diffl[-2] > 0.5:
+                #         #     self.stats['policy_lr'] = np.clip(1.2 * self.stats['policy_lr'], 1e-5, 1e-1)
+                #         # else:
+                #         #     self.stats['policy_lr'] = np.clip(0.8 * self.stats['policy_lr'], 1e-5, 1e-1)
+                #         # K.set_value(self.amodel.optimizer.lr, self.stats['policy_lr'])
+                #         print('ratio:', round(ratio, 6), 'lr', round(self.stats['evmodel_lr'], 6))
+                #         if abs(ratio)<0.2 and losses[-1]<losses[0]:
+                #             break
 
+                print('training int value model...')       
+                losses = []
+                preloss = np.zeros(self.buffer['itargets'].shape)
+                preloss = self.ivmodel.predict(x=[self.buffer['states'], self.buffer['itargets'], preloss])
+                evaluated = self.ivmodel.evaluate(x=[self.buffer['states'], self.buffer['itargets'], preloss], batch_size=self.batch_size)
+                count = 0          
+                while count<20:
+                    if count == 0:
+                        losses.append(self.ivmodel.evaluate(x=[self.buffer['states'], self.buffer['itargets'], preloss], 
+                                                batch_size = self.batch_size))
+                        print('evaluated loss:', losses[-1])
+                    history = self.ivmodel.fit(x=[self.buffer['states'], self.buffer['itargets'], preloss], 
+                                                batch_size = self.batch_size, epochs=1)
+                    losses.append(history.history['loss'][-1])
+                    peak = np.argmax(losses)
+                    count += 1
+                    if len(losses)> peak+self.count+1:
+                        diffl = np.array(losses[:-1]) - np.array(losses[1:])
+                        ratio = np.mean(diffl[-self.count:])/np.mean(diffl[peak:peak+self.count])
+                        # if diffl[-1]/diffl[-2] > 0.5:
+                        #     self.stats['policy_lr'] = np.clip(1.2 * self.stats['policy_lr'], 1e-5, 1e-1)
+                        # else:
+                        #     self.stats['policy_lr'] = np.clip(0.8 * self.stats['policy_lr'], 1e-5, 1e-1)
+                        # K.set_value(self.amodel.optimizer.lr, self.stats['policy_lr'])
+                        print('ratio:', round(ratio, 6), 'lr', round(self.stats['ivmodel_lr'], 6))
+                        if ratio<0.2 and losses[-1]<losses[0]:
+                            break
                 
-                # print('training imodel...')
-                # self.reward_model.fit(x=self.buffer['states'],
-                #                     batch_size = self.batch_size)
-
+                print('training imodel...')
+                states = self.reusable_memory[-1]['states']
+                preloss = self.get_iloss(states)
+                print('shape of preloss', preloss.shape)
+                steps = len(preloss)
+                if self.stats['initialized'] > 0:
+                    self.stats['imean'] = ((self.horizon-steps)*self.stats['imean']+steps*np.mean(preloss))/self.horizon
+                    self.stats['istd'] = ((self.horizon-steps)*self.stats['istd']+steps*np.std(preloss))/self.horizon
+                    self.stats['imax'] = ((self.horizon-steps)*self.stats['imax']+steps*np.max(preloss))/self.horizon
+                    self.stats['imin'] = ((self.horizon-steps)*self.stats['imin']+steps*np.min(preloss))/self.horizon
+                else:
+                    self.stats['imean'] = np.mean(preloss)
+                    self.stats['istd'] = np.std(preloss)
+                    self.stats['imax'] = np.max(preloss)
+                    self.stats['imin'] = np.min(preloss)
+                self.stats['initialized'] += 1
+                choosed = preloss > self.stats['imean']
+                stds = np.zeros((*preloss.shape, 1))
+                means = np.zeros((*preloss.shape, 1))
+                stds[:,0] += self.stats['istd']
+                means[:,0] += self.stats['imean']
+                temp = np.zeros((*preloss.shape, 1))
+                temp[:,0] += preloss
+                preloss = temp 
+                losses = []
+                # print('evaluated loss:', np.mean(ratios), 'maxr:', np.max(ratios), 'minr:', np.min(ratios), 'stds:', np.std(ratios))
+                if len(choosed[choosed])>0:
+                    count = 0 
+                    while count<20:
+                        count += 1
+                        history = self.reward_model.fit(x=[states, preloss, stds, means],
+                                        batch_size = 1)
+                        losses.append(history.history['loss'][-1]) 
+                        # peak = np.argmax(losses)
+                        # if len(losses)> peak+11:
+                        #     diffl = np.array(losses[:-1]) - np.array(losses[1:])
+                        #     ratio = np.mean(diffl[-10:])/np.mean(diffl[peak:peak+10])
+                        #     # if diffl[-1]/diffl[-2] > 0.5:
+                        #     #     self.stats['policy_lr'] = np.clip(1.2 * self.stats['policy_lr'], 1e-5, 1e-1)
+                        #     # else:
+                        #     #     self.stats['policy_lr'] = np.clip(0.8 * self.stats['policy_lr'], 1e-5, 1e-1)
+                        #     # K.set_value(self.amodel.optimizer.lr, self.stats['policy_lr'])
+                        #     print('ratio:', round(ratio, 6), 'lr', round(self.stats['imodel_lr'], 6))
+                        #     if abs(ratio)<0.2:
+                        #         break
+                        if losses[-1]<0.2:
+                            break
 
 
             
-                preloss = self.get_iloss(self.buffer['states'])
-                self.stats['imean'] = np.mean(preloss)
-                self.stats['istd'] = np.std(preloss)
-                self.stats['imax'] = np.min(preloss)
-                self.stats['imin'] = np.max(preloss)
-                self.stats['initialized'] += 1     
+                     
 
                 # # l = []
                 # # for _ in range(math.ceil(self.maxstat/2)):
@@ -371,7 +446,7 @@ class SonicAgent():
             self.stats['window'] = 10
             self.stats['mean100_external_rewards'] = []
             self.stats['external_rewards'] = []
-            self.stats['external_rewards_per_step'] = []
+            self.stats['external_rewards_per_step']  = []
             self.stats['entropy'] = []
             self.stats['some_map'] = []
             self.stats['ireward_map'] = []
@@ -380,9 +455,7 @@ class SonicAgent():
             self.stats['y'] = []
             self.stats['cutted'] = []
             self.stats['action_std'] = []
-            self.stats['policy_lr'] = 1e-7
-            self.stats['evmodel_lr'] = 1e-6
-            self.stats['ivmodel_lr'] = 1e-6
+
 
     def actor_data_generator(self, states, advantages, policies):
         steps = len(states)
@@ -450,8 +523,11 @@ class SonicAgent():
                 yield state_batch, dummy_target
     
     def compute_advantages(self, states, rewards, actions, value_model, gamma, lam, episodic, trace):
+        steps = len(states)
         states = self.process_states(states)
-        values = value_model.predict(states)
+        dummy_sigma = np.zeros((steps, 1))
+        dummy_target = np.zeros((steps, 1))
+        values = value_model.predict([states, dummy_target, dummy_sigma])
         
         rewards = np.array(rewards)
         # print('reards shape', rewards.shape)
@@ -466,7 +542,7 @@ class SonicAgent():
             G.append(temp)
         G.reverse()
         G = np.array(G, dtype=np.float32)
-        steps = len(states)
+        
         advantages = np.zeros((steps,self.action_space)).astype(self.adv)
         target_values = np.zeros((steps,1)).astype(self.adv)
         td = np.zeros((steps,1)).astype(self.adv)
@@ -525,7 +601,7 @@ class SonicAgent():
             action_id, cur_policy = self.choose_action(cur_mem, Amodel, render)
             policy.append(cur_policy)
             actions.append(action_id)
-            for _ in range(random.randint(delay_limit-3, delay_limit+3)):
+            for _ in range(random.randint(delay_limit-0, delay_limit+0)):
                 next_state, reward, done, info = env.step(self.actions[action_id])
                 frame_reward += reward
             erewards.append(frame_reward)
@@ -597,8 +673,8 @@ class SonicAgent():
         dummy_states = np.zeros((1, *self.state_shape))
         policy = Amodel.predict([states, dummy_rew, dummy_states, dummy_ref, dummy_crange])
         policy = policy[-1]
-        if render:
-            print([round(pol,6) for pol in policy])
+        # if render:
+        #     print([round(pol,6) for pol in policy])
         order = np.random.choice(self.action_space, size=None, p=policy)
         return order, policy
 
@@ -645,7 +721,6 @@ class SonicAgent():
         erewards = result['erewards']
         irewards = result['irewards']
         policy = result['policy']
-        coords = result['coords']
         entropy = self.get_entropy(policy)
         steps = len(erewards)
         self.stats['action_std'].append(np.std(policy))
@@ -658,17 +733,15 @@ class SonicAgent():
         self.stats['mean100_external_rewards'].append(np.mean(self.stats['external_rewards'][-100:]))
         
 
-        self.stats['x'].extend(list(coords[:-self.cutted_steps,0]))
-        self.stats['y'].extend(list(coords[:-self.cutted_steps,1]))
-        self.stats['some_map'].extend(list(irewards[:-self.cutted_steps]))
-        self.stats['ireward_map'].extend(list(irewards[:-self.cutted_steps]))
-        self.stats['entropy_map'].extend(list(entropy[:-self.cutted_steps]))
-        self.stats['cutted'].append(steps-self.cutted_steps)
+        
 
         print('episode: ', self.stats['episodes_passed'],
             'episode_reward: ', self.stats['external_rewards'][-1],
             'mean_reward: ', self.stats['mean100_external_rewards'][-1])
-        print('mean_entropy:', np.mean(self.stats['entropy'][-10:]))
+        if len(self.stats['entropy'])>1:
+            print('mean_entropy:', (self.stats['entropy'][-1]*steps+((2*self.memory_size)-steps)*self.stats['entropy'][-2])/(2*self.memory_size))
+        else:
+            print('mean_entropy:', self.stats['entropy'][-1])
         print('sum_irewards:', np.sum(irewards))
         print('steps:', steps)
         print('std:', np.std(policy, axis=0))
@@ -686,11 +759,13 @@ class SonicAgent():
         return memory_length
 
     def reduce_memory(self):
-        while len(self.reusable_memory)>1:#self.get_memory_length()>self.memory_size and len(self.reusable_memory)>2:
+        while self.get_memory_length()>self.memory_size and len(self.reusable_memory)>2:
             # index = np.argmin(self.mean_adv)
             # self.reusable_memory.pop(index)
             # self.mean_adv.pop(index)
             self.reusable_memory.pop(0)
+        # while len(self.reusable_memory)>1:
+        #     self.reusable_memory.pop(0)
         gc.collect()
 
 
@@ -701,8 +776,6 @@ class SonicAgent():
 
 
     def save_models(self):
-        #self.stochastic_model.save_weights(r'D:\sonic_models\stochastic_model.h5')
-        #self.trainable_model.save_weights(r'D:\sonic_models\trainable_model.h5')
         self.amodel.save_weights(r'D:\sonic_models\policy_model.h5')
         self.evmodel.save_weights(r'D:\sonic_models\evalue_model.h5')
         self.ivmodel.save_weights(r'D:\sonic_models\ivalue_model.h5')
@@ -719,34 +792,39 @@ class SonicAgent():
     
 
     def create_models(self):
+
         self.amodel = policy_net(self.state_shape, self.action_space)
         K.set_value(self.amodel.optimizer.lr, self.stats['policy_lr'])
-        # weights = [0.01*np.array(w) for w in self.amodel.get_weights()]
-        #self.amodel.set_weights(weights)
         if os.path.isfile(r'D:\sonic_models\policy_model.h5'):
             self.amodel.load_weights(r'D:\sonic_models\policy_model.h5')
         
 
         self.evmodel = critic_net(self.state_shape, self.epsilon)
+        weights = [np.array(w) for w in self.evmodel.get_weights()]
+        weights[-1] *= 0
+        self.evmodel.set_weights(weights)
         K.set_value(self.evmodel.optimizer.lr, self.stats['evmodel_lr'])
         if os.path.isfile(r'D:\sonic_models\evalue_model.h5'):
             self.evmodel.load_weights(r'D:\sonic_models\evalue_model.h5')
 
         self.ivmodel = critic_net(self.state_shape, self.epsilon)
+        weights = [np.array(w) for w in self.ivmodel.get_weights()]
+        weights[-1] *= 0
+        self.ivmodel.set_weights(weights)
         K.set_value(self.ivmodel.optimizer.lr, self.stats['ivmodel_lr'])
         if os.path.isfile(r'D:\sonic_models\ivalue_model.h5'):
             self.ivmodel.load_weights(r'D:\sonic_models\ivalue_model.h5')
 
         self.reward_model = reward_net(self.state_shape)
+        K.set_value(self.reward_model.optimizer.lr, self.stats['imodel_lr'])
         if os.path.isfile(r'D:\sonic_models\reward_model.h5'):
             self.reward_model.load_weights(r'D:\sonic_models\reward_model.h5')
-
-        # self.trainable_model = base_net(self.state_shape)
-        # if os.path.isfile(r'D:\sonic_models\trainable_model.h5'):
-        #     self.trainable_model.load_weights(r'D:\sonic_models\trainable_model.h5')
     
     def get_iloss(self, states):
-        return self.reward_model.predict(states)
+        dummy_old = np.zeros((len(states),))
+        dummy_std = np.zeros((len(states),))
+        dummy_mean = np.zeros((len(states),))
+        return self.reward_model.predict(x=[states, dummy_old, dummy_std, dummy_mean])
 
 
     def run_workers(self, num_workers):

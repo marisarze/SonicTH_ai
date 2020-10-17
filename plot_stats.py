@@ -13,7 +13,8 @@ s = np.array(stat['some_map'])
 e = np.array(stat['entropy_map']) 
 r = np.array(stat['ireward_map'])
 
-d = 1
+d = 8
+
 #r = np.clip(r, 0,100)
 
 # randomize = np.arange(steps)
@@ -37,13 +38,13 @@ rr = r[::d]
 # ax.set_zlabel('ratio')
 # plt.show()
 
-# fig = plt.figure()
-# ax = fig.add_subplot(111, projection='3d')
-# ax.scatter(xx,yy,ee)
-# ax.set_xlabel('X axis')
-# ax.set_ylabel('Y axis')
-# ax.set_zlabel('entropy')
-# plt.show()
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(xx,yy,ee)
+ax.set_xlabel('X axis')
+ax.set_ylabel('Y axis')
+ax.set_zlabel('entropy')
+plt.show()
 
 # fig = plt.figure()
 # ax = fig.add_subplot(111, projection='3d')
@@ -62,29 +63,29 @@ rr = r[::d]
 # ax.set_zlabel('rewards')
 # plt.show()
 
-# total = []
-# ind = 0
-# sum = 0
-# for elem in stat['cutted']:
-#     elem = int(elem)
-#     sum = 0
-#     count = 0
-#     for i in r[ind:ind+elem]:
-#         sum += i * (0.999 ** count)
-#         total.append(sum)
-#         count += 1
-#     ind += elem
-# total = np.array(total)
-# tt = total[::d]
+total = []
+ind = 0
+sum = 0
+for elem in stat['cutted']:
+    elem = int(elem)
+    sum = 0
+    count = 0
+    for i in r[ind:ind+elem]:
+        sum += i * (0.999 ** count)
+        total.append(sum)
+        count += 1
+    ind += elem
+total = np.array(total)
+tt = total[::d]
 
-# print(total.shape, x.shape, y.shape)
-# fig = plt.figure()
-# ax = fig.add_subplot(111, projection='3d')
-# ax.scatter(xx,yy,tt)
-# ax.set_xlabel('X axis')
-# ax.set_ylabel('Y axis')
-# ax.set_zlabel('total')
-# plt.show()
+print(total.shape, x.shape, y.shape)
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(xx,yy,tt)
+ax.set_xlabel('X axis')
+ax.set_ylabel('Y axis')
+ax.set_zlabel('total')
+plt.show()
 
 
 score = stat['entropy']
@@ -112,6 +113,7 @@ ax = fig.add_subplot()
 ax.plot(steps, rscore)
 ax.set_xlabel('agent steps (millions)')
 ax.set_ylabel('ereward_mean')
+#ax.set_xscale('log')
 plt.show()
 
 stds = stat['action_std']
